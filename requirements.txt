@@ -1,0 +1,29 @@
+# Core ML / NLP
+torch>=2.2.0
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+
+# Vector store
+chromadb>=0.5.0
+
+# LLM providers
+openai>=1.30.0
+anthropic>=0.28.0
+
+# Document ingestion
+pypdf>=4.2.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+playwright>=1.44.0
+
+# API
+fastapi>=0.111.0
+uvicorn>=0.29.0
+pydantic>=2.7.0
+python-multipart>=0.0.9
+
+# Frontend
+gradio>=4.36.0
+
+# Utilities
+python-dotenv>=1.0.0
