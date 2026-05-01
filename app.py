@@ -4,16 +4,18 @@ app.py
 Gradio frontend for the LLM Eval Platform.
 
 Tabs:
-  1. Benchmarks   — create benchmarks, add/import/generate test cases
-  2. Run Eval     — pick a benchmark and model, launch a run, watch progress
-  3. Results      — browse run history, view per-question breakdown and domain scores
-  4. Compare      — diff two runs side by side
+  1. New Benchmark  — upload a PDF, name it, auto-generate test cases, done
+  2. My Benchmarks  — view existing benchmarks, manage test cases, add manually
+  3. Run Eval       — pick a benchmark and model, launch a run, watch progress
+  4. Results        — browse run history, per-question breakdown, domain scores
+  5. Compare Models — diff two runs side by side
 
 Run locally:
     uvicorn api.main:app --reload --port 8000
     python app.py
 """
 
+import io
 import os
 import time
 
@@ -77,9 +79,12 @@ def _get(path: str, params: dict = None) -> dict | list:
         raise gr.Error(f"Connection error — is the FastAPI server running? {e}")
 
 
-def _post(path: str, json: dict = None) -> dict | list:
+def _post(path: str, json: dict = None, files: dict = None) -> dict | list:
     try:
-        r = http_requests.post(f"{API_BASE}{path}", json=json, timeout=300)
+        if files:
+            r = http_requests.post(f"{API_BASE}{path}", files=files, timeout=300)
+        else:
+            r = http_requests.post(f"{API_BASE}{path}", json=json, timeout=300)
         r.raise_for_status()
         return r.json()
     except http_requests.HTTPError as e:
@@ -109,9 +114,19 @@ def _api_key(raw: str) -> str | None:
     return None if not s or s == "Not required" else s
 
 
+def _read_pdf(file_path: str) -> str:
+    """Extract text from an uploaded PDF file."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(file_path)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
 def update_models(display_provider: str):
     key = _resolve_provider(display_provider)
     models = PROVIDER_MODELS.get(key, [])
+    # Always return both choices AND value together so Gradio never
+    # tries to validate the old value against the new choices list.
     return gr.update(choices=models, value=models[0] if models else None)
 
 
@@ -159,15 +174,81 @@ def _parse_run_id(choice: str) -> int:
     return int(choice.split(" | ")[0].replace("Run ", ""))
 
 
-def create_benchmark_fn(name: str, description: str):
-    if not name.strip():
-        return "Benchmark name is required.", gr.update()
-    result = _post(
-        "/benchmarks", {"name": name.strip(), "description": description.strip()}
+# ---------------------------------------------------------------------------
+# New Benchmark tab — the simple flow
+# ---------------------------------------------------------------------------
+
+
+def create_from_pdf_fn(
+    pdf_file,
+    benchmark_name: str,
+    num_questions: int,
+    domain: str,
+    source_type: str,
+    display_provider: str,
+    model: str,
+    api_key_raw: str,
+):
+    if pdf_file is None:
+        return "Upload a PDF first.", "", gr.update()
+    if not benchmark_name.strip():
+        return "Give the benchmark a name.", "", gr.update()
+
+    # Read PDF text locally
+    try:
+        doc_text = _read_pdf(pdf_file.name)
+    except Exception as e:
+        return f"Could not read PDF: {e}", "", gr.update()
+
+    if len(doc_text.strip()) < 100:
+        return (
+            "PDF appears to be empty or unreadable (scanned image PDFs are not supported).",
+            "",
+            gr.update(),
+        )
+
+    # Create the benchmark
+    try:
+        bm = _post(
+            "/benchmarks",
+            {"name": benchmark_name.strip(), "description": f"Auto-generated from PDF"},
+        )
+    except gr.Error as e:
+        return str(e), "", gr.update()
+
+    benchmark_id = bm["id"]
+
+    # Generate test cases
+    provider = _resolve_provider(display_provider)
+    try:
+        result = _post(
+            f"/benchmarks/{benchmark_id}/generate-cases",
+            {
+                "reference_text": doc_text,
+                "num_cases": int(num_questions),
+                "domain": domain,
+                "source_type": source_type,
+                "provider": provider,
+                "model": model,
+                "api_key": _api_key(api_key_raw),
+            },
+        )
+    except gr.Error as e:
+        return str(e), "", gr.update()
+
+    questions_preview = "\n".join(
+        f"{i + 1}. {q}" for i, q in enumerate(result["questions"])
     )
-    return f"Benchmark '{result['name']}' created (ID {result['id']}).", gr.update(
-        choices=_benchmark_choices()
+    status = (
+        f"Benchmark '{benchmark_name.strip()}' created with {result['generated']} test cases.\n"
+        f"Go to Run Eval to test a model against it."
     )
+    return status, questions_preview, gr.update(choices=_benchmark_choices())
+
+
+# ---------------------------------------------------------------------------
+# My Benchmarks tab
+# ---------------------------------------------------------------------------
 
 
 def refresh_benchmarks_fn():
@@ -184,13 +265,16 @@ def delete_benchmark_fn(choice: str):
 
 def load_cases_fn(choice: str):
     if not choice:
-        return "Select a benchmark first.", ""
+        return "Select a benchmark to see its test cases.", ""
     bid = _parse_benchmark_id(choice)
     cases = _get(f"/benchmarks/{bid}/cases")
     if not cases:
         return "No test cases yet.", ""
-    lines = [f"[{c['id']}] [{c['domain'].upper()}] {c['question']}" for c in cases]
-    return f"{len(cases)} test cases", "\n".join(lines)
+    lines = [
+        f"[{c['id']}] [{c['domain'].upper()}] [{c['source_type'].upper()}] {c['question']}"
+        for c in cases
+    ]
+    return f"{len(cases)} test cases loaded", "\n".join(lines)
 
 
 def add_case_fn(
@@ -199,7 +283,7 @@ def add_case_fn(
     if not choice:
         return "Select a benchmark first."
     if not question.strip() or not reference_text.strip():
-        return "Question and reference text are required."
+        return "Both question and reference text are required."
     bid = _parse_benchmark_id(choice)
     _post(
         f"/benchmarks/{bid}/cases",
@@ -213,48 +297,18 @@ def add_case_fn(
     return "Test case added."
 
 
-def bulk_import_fn(choice: str, csv_text: str):
-    if not choice:
-        return "Select a benchmark first."
-    if not csv_text.strip():
-        return "Paste CSV content above."
-    bid = _parse_benchmark_id(choice)
-    result = _post(f"/benchmarks/{bid}/cases/bulk", {"csv_text": csv_text})
-    return f"Imported {result['added']} test cases."
+def delete_case_fn(case_id_str: str):
+    try:
+        case_id = int(case_id_str.strip())
+    except ValueError:
+        return "Enter a valid case ID (the number in brackets when you load cases)."
+    _delete(f"/cases/{case_id}")
+    return f"Case {case_id} deleted."
 
 
-def generate_cases_fn(
-    choice: str,
-    reference_text: str,
-    num_cases: int,
-    domain: str,
-    source_type: str,
-    display_provider: str,
-    model: str,
-    api_key_raw: str,
-):
-    if not choice:
-        return "Select a benchmark first.", ""
-    if not reference_text.strip():
-        return "Paste a reference document first.", ""
-    bid = _parse_benchmark_id(choice)
-    provider = _resolve_provider(display_provider)
-    result = _post(
-        f"/benchmarks/{bid}/generate-cases",
-        {
-            "reference_text": reference_text.strip(),
-            "num_cases": int(num_cases),
-            "domain": domain,
-            "source_type": source_type,
-            "provider": provider,
-            "model": model,
-            "api_key": _api_key(api_key_raw),
-        },
-    )
-    questions_text = "\n".join(
-        f"{i + 1}. {q}" for i, q in enumerate(result["questions"])
-    )
-    return f"Generated and saved {result['generated']} test cases.", questions_text
+# ---------------------------------------------------------------------------
+# Run Eval tab
+# ---------------------------------------------------------------------------
 
 
 def start_run_fn(
@@ -285,7 +339,6 @@ def start_run_fn(
         },
     )
     run_id = result["run_id"]
-    status_lines = [f"Run {run_id} started. {result['message']}"]
 
     for _ in range(240):
         time.sleep(5)
@@ -295,18 +348,27 @@ def start_run_fn(
             total = run.get("total_cases", 1)
             status = run.get("status", "running")
             pct = completed / total * 100 if total else 0
-            status_lines = [
-                f"Status: {status.upper()} — {completed}/{total} cases ({pct:.0f}%)"
+            lines = [
+                f"Status: {status.upper()} — {completed}/{total} questions scored ({pct:.0f}%)"
             ]
             if run.get("avg_score") is not None:
-                status_lines.append(f"Avg hallucination score: {run['avg_score']:.2%}")
-                status_lines.append(f"Grounded rate: {run['grounded_pct']:.0%}")
+                lines.append(f"Hallucination score: {run['avg_score']:.0%}")
+                lines.append(f"Grounded rate: {run['grounded_pct']:.0%}")
             if status in ("completed", "failed"):
+                if status == "completed":
+                    lines.append(
+                        "Done. Go to the Results tab to see the full breakdown."
+                    )
                 break
         except Exception:
             break
 
-    return "\n".join(status_lines), gr.update(choices=_run_choices())
+    return "\n".join(lines), gr.update(choices=_run_choices())
+
+
+# ---------------------------------------------------------------------------
+# Results tab
+# ---------------------------------------------------------------------------
 
 
 def load_run_results_fn(run_choice: str):
@@ -318,21 +380,20 @@ def load_run_results_fn(run_choice: str):
     domains = _get(f"/runs/{run_id}/domains")
 
     summary_lines = [
-        f"Run {run_id} — {run['model']} on {run['benchmark_name']}",
-        f"Status: {run['status'].upper()}",
-        f"Avg hallucination score: {run['avg_score']:.2%}"
+        f"Model: {run['model']}   Benchmark: {run['benchmark_name']}",
+        f"Status: {run['status'].upper()}   {run.get('completed_cases', 0)}/{run.get('total_cases', 0)} questions",
+        f"Hallucination score: {run['avg_score']:.0%}"
         if run["avg_score"] is not None
         else "Score: N/A",
         f"Grounded rate: {run['grounded_pct']:.0%}"
         if run["grounded_pct"] is not None
         else "",
-        f"{run.get('completed_cases', 0)}/{run.get('total_cases', 0)} cases completed",
     ]
 
-    domain_lines = ["Domain breakdown:"]
+    domain_lines = []
     for d in domains:
         domain_lines.append(
-            f"  {d['domain'].upper()}: avg {d['avg_score']:.2%} | "
+            f"{d['domain'].upper()}: {d['avg_score']:.0%} hallucination | "
             f"{d['grounded']} grounded / {d['hallucinated']} hallucinated / {d['total']} total"
         )
 
@@ -342,12 +403,17 @@ def load_run_results_fn(run_choice: str):
             10 - int(r["hallucination_score"] * 10)
         )
         case_lines.append(
-            f"[{r['domain'].upper()}] {r['question']}\n"
-            f"  {r['overall_label']} [{bar}] {r['hallucination_score']:.0%}\n"
-            f"  Response: {r['response'][:120]}{'...' if len(r['response']) > 120 else ''}\n"
+            f"Q: {r['question']}\n"
+            f"   Verdict: {r['overall_label']}  [{bar}]  {r['hallucination_score']:.0%} hallucination\n"
+            f"   Answer:  {r['response'][:150]}{'...' if len(r['response']) > 150 else ''}\n"
         )
 
     return "\n".join(summary_lines), "\n".join(domain_lines), "\n".join(case_lines)
+
+
+# ---------------------------------------------------------------------------
+# Compare tab
+# ---------------------------------------------------------------------------
 
 
 def compare_runs_fn(choice_a: str, choice_b: str):
@@ -365,63 +431,65 @@ def compare_runs_fn(choice_a: str, choice_b: str):
     direction = "better" if delta < 0 else "worse" if delta > 0 else "unchanged"
 
     lines = [
-        f"Run A: {ra['model']} on {ra['benchmark_name']}",
-        f"Run B: {rb['model']} on {rb['benchmark_name']}",
+        f"Run A: {ra['model']}  on  {ra['benchmark_name']}",
+        f"Run B: {rb['model']}  on  {rb['benchmark_name']}",
         "",
-        f"Overall avg score  A: {data['avg_score_a']:.2%}   B: {data['avg_score_b']:.2%}",
-        f"Overall delta: {delta:+.2%}  (Run B is {direction})",
+        f"Hallucination score   A: {data['avg_score_a']:.0%}   B: {data['avg_score_b']:.0%}",
+        f"Overall delta: {delta:+.0%}  (Run B is {direction})",
         f"Improved: {data['improved_count']}   Regressed: {data['regressed_count']}   Stable: {data['stable_count']}",
     ]
 
-    # Source type reliability breakdown
-    lines += ["", "Reliability breakdown by document source:"]
+    # Source type split
+    lines += ["", "Score by document source:"]
     for label, st_key in [
-        ("Internal documents (reliable)", "internal"),
-        ("Public documents (contamination risk)", "public"),
+        ("Internal (reliable)", "internal"),
+        ("Public (contamination risk)", "public"),
     ]:
         sa = data["source_type_scores_a"].get(st_key)
         sb = data["source_type_scores_b"].get(st_key)
         if sa or sb:
-            score_a_str = f"{sa['avg_score']:.2%}" if sa else "n/a"
-            score_b_str = f"{sb['avg_score']:.2%}" if sb else "n/a"
-            total = (sa["total"] if sa else 0) or (sb["total"] if sb else 0)
-            lines.append(f"  {label} ({total} cases)")
-            lines.append(f"    A: {score_a_str}   B: {score_b_str}")
+            a_str = f"{sa['avg_score']:.0%}" if sa else "n/a"
+            b_str = f"{sb['avg_score']:.0%}" if sb else "n/a"
+            n = (sa["total"] if sa else 0) or (sb["total"] if sb else 0)
+            lines.append(f"  {label} ({n} questions): A={a_str}  B={b_str}")
             if st_key == "public":
                 lines.append(
-                    "    Note: public document scores may be inflated by training data memorization."
+                    "  (Public scores may be inflated — model may have seen this content in training)"
                 )
 
     lines += ["", "Per-question breakdown:"]
     for c in data["per_case"]:
-        src_flag = " [PUBLIC]" if c["source_type"] == "public" else ""
+        flag = " [PUBLIC]" if c["source_type"] == "public" else ""
         lines.append(
-            f"  [{c['domain'].upper()}]{src_flag} {c['question'][:80]}\n"
-            f"    A: {c['label_a']} {c['score_a']:.0%}   "
-            f"B: {c['label_b']} {c['score_b']:.0%}   "
-            f"{c['verdict'].upper()} ({c['delta']:+.2%})"
+            f"  {c['question'][:90]}{flag}\n"
+            f"    A: {c['label_a']} {c['score_a']:.0%}   B: {c['label_b']} {c['score_b']:.0%}   {c['verdict'].upper()} ({c['delta']:+.0%})"
         )
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
 
 
 def build_ui() -> gr.Blocks:
     with gr.Blocks(
         title="LLM Eval Platform",
         theme=gr.themes.Soft(),
-        css="""
-            #page-subtitle { color: #888; font-size: 0.9em; margin-top: 0; }
-            footer { display: none !important; }
-        """,
+        css="footer { display: none !important; }",
     ) as demo:
         gr.Markdown("# LLM Eval Platform")
         gr.Markdown(
-            "Create benchmarks, run models against them, and compare results across model versions.",
-            elem_id="page-subtitle",
+            "Test any LLM for hallucination on your own documents. "
+            "Upload a PDF, generate questions from it, run a model, see where it makes things up."
         )
 
+        # Global LLM settings — used everywhere
         with gr.Group():
-            gr.Markdown("**LLM Settings**")
+            gr.Markdown(
+                "**LLM Settings** — applies to question generation and eval runs"
+            )
             with gr.Row():
                 g_provider = gr.Dropdown(
                     choices=PROVIDER_DISPLAY_LABELS,
@@ -434,6 +502,7 @@ def build_ui() -> gr.Blocks:
                     value=PROVIDER_MODELS["openai"][0],
                     label="Model",
                     scale=2,
+                    allow_custom_value=True,  # prevents validation error during provider switch
                 )
                 g_api_key = gr.Textbox(
                     label="API Key",
@@ -444,59 +513,128 @@ def build_ui() -> gr.Blocks:
             g_provider.change(fn=update_models, inputs=g_provider, outputs=g_model)
             g_provider.change(fn=update_key_field, inputs=g_provider, outputs=g_api_key)
 
-        with gr.Accordion("Detection Thresholds", open=False):
+        with gr.Accordion(
+            "Detection Thresholds — leave as default unless you know what you're doing",
+            open=False,
+        ):
+            gr.Markdown(
+                "These control how strict the hallucination scorer is. "
+                "Higher entailment threshold = harder for a sentence to be called grounded. "
+                "The defaults work well for most cases."
+            )
             with gr.Row():
                 entail_s = gr.Slider(
-                    0.1, 0.9, value=0.5, step=0.05, label="Entailment threshold"
+                    0.1,
+                    0.9,
+                    value=0.5,
+                    step=0.05,
+                    label="Entailment threshold (how confident the model must be that the sentence is supported)",
                 )
                 contradict_s = gr.Slider(
-                    0.1, 0.9, value=0.5, step=0.05, label="Contradiction threshold"
+                    0.1,
+                    0.9,
+                    value=0.5,
+                    step=0.05,
+                    label="Contradiction threshold (how confident before marking as contradicted)",
                 )
             with gr.Row():
                 grounded_s = gr.Slider(
-                    0.1, 0.6, value=0.3, step=0.05, label="Grounded score ceiling"
+                    0.1,
+                    0.6,
+                    value=0.3,
+                    step=0.05,
+                    label="Overall grounded ceiling (overall score below this = GROUNDED verdict)",
                 )
                 partial_s = gr.Slider(
-                    0.3, 0.9, value=0.6, step=0.05, label="Partially grounded ceiling"
+                    0.3,
+                    0.9,
+                    value=0.6,
+                    step=0.05,
+                    label="Overall partial ceiling (below this = PARTIALLY GROUNDED, above = HALLUCINATED)",
                 )
 
         with gr.Tabs():
-            with gr.Tab("Benchmarks"):
+            # ------------------------------------------------------------------
+            with gr.Tab("New Benchmark"):
                 gr.Markdown(
-                    "A benchmark is a named set of test cases. Each test case is a question "
-                    "paired with a reference document — the ground truth the model's answer is checked against."
+                    "The fastest way to get started. Upload a PDF, give it a name, "
+                    "and the system will automatically generate factual questions from it. "
+                    "Those questions become your benchmark — a reusable test set you can run any model against."
                 )
+
                 with gr.Row():
                     with gr.Column(scale=1):
-                        gr.Markdown("**Create benchmark**")
-                        bm_name = gr.Textbox(
-                            label="Name", placeholder="e.g. Medical QA v1"
+                        nb_pdf = gr.File(label="Upload PDF", file_types=[".pdf"])
+                        nb_name = gr.Textbox(
+                            label="Benchmark name", placeholder="e.g. File System QA"
                         )
-                        bm_desc = gr.Textbox(
-                            label="Description", placeholder="Optional"
-                        )
-                        bm_create_btn = gr.Button("Create", variant="primary")
-                        bm_create_out = gr.Markdown()
-
-                    with gr.Column(scale=2):
-                        gr.Markdown("**Existing benchmarks**")
-                        bm_list = gr.Dropdown(
-                            choices=_benchmark_choices(),
-                            label="Select benchmark",
-                            interactive=True,
+                        nb_num = gr.Slider(
+                            3,
+                            30,
+                            value=10,
+                            step=1,
+                            label="Number of test questions to generate",
                         )
                         with gr.Row():
-                            bm_refresh_btn = gr.Button("Refresh", size="sm")
-                            bm_delete_btn = gr.Button(
-                                "Delete selected", size="sm", variant="stop"
+                            nb_domain = gr.Dropdown(
+                                choices=DOMAINS, value="general", label="Domain"
                             )
-                        bm_action_out = gr.Markdown()
+                            nb_source_type = gr.Radio(
+                                choices=["internal", "public"],
+                                value="internal",
+                                label="Document source",
+                                info="Internal = private doc. Public = Wikipedia, papers, etc.",
+                            )
+                        nb_create_btn = gr.Button(
+                            "Create benchmark from PDF", variant="primary", size="lg"
+                        )
 
-                bm_create_btn.click(
-                    fn=create_benchmark_fn,
-                    inputs=[bm_name, bm_desc],
-                    outputs=[bm_create_out, bm_list],
+                    with gr.Column(scale=1):
+                        nb_status = gr.Textbox(
+                            label="Status", lines=3, interactive=False
+                        )
+                        nb_preview = gr.Textbox(
+                            label="Generated questions preview",
+                            lines=12,
+                            interactive=False,
+                        )
+                        nb_bm_update = gr.State()
+
+                nb_create_btn.click(
+                    fn=create_from_pdf_fn,
+                    inputs=[
+                        nb_pdf,
+                        nb_name,
+                        nb_num,
+                        nb_domain,
+                        nb_source_type,
+                        g_provider,
+                        g_model,
+                        g_api_key,
+                    ],
+                    outputs=[nb_status, nb_preview, nb_bm_update],
                 )
+
+            # ------------------------------------------------------------------
+            with gr.Tab("My Benchmarks"):
+                gr.Markdown(
+                    "View and manage your benchmarks. "
+                    "You can also add test cases manually here if you prefer to write your own questions."
+                )
+
+                with gr.Row():
+                    bm_list = gr.Dropdown(
+                        choices=_benchmark_choices(),
+                        label="Select a benchmark",
+                        scale=3,
+                        interactive=True,
+                    )
+                    bm_refresh_btn = gr.Button("Refresh", size="sm", scale=0)
+                    bm_delete_btn = gr.Button(
+                        "Delete", size="sm", variant="stop", scale=0
+                    )
+
+                bm_action_out = gr.Markdown()
                 bm_refresh_btn.click(fn=refresh_benchmarks_fn, outputs=bm_list)
                 bm_delete_btn.click(
                     fn=delete_benchmark_fn,
@@ -504,136 +642,78 @@ def build_ui() -> gr.Blocks:
                     outputs=[bm_action_out, bm_list],
                 )
 
-                gr.Markdown("**Test cases**")
                 with gr.Row():
-                    cases_load_btn = gr.Button("Load cases", size="sm")
-                    cases_count = gr.Markdown()
-                cases_display = gr.Textbox(label="Cases", lines=8, interactive=False)
+                    cases_load_btn = gr.Button("Load test cases", size="sm")
+                    cases_count_out = gr.Markdown()
+                cases_display = gr.Textbox(
+                    label="Test cases", lines=10, interactive=False
+                )
                 cases_load_btn.click(
                     fn=load_cases_fn,
                     inputs=bm_list,
-                    outputs=[cases_count, cases_display],
+                    outputs=[cases_count_out, cases_display],
                 )
 
-                with gr.Tabs():
-                    with gr.Tab("Add single case"):
-                        tc_question = gr.Textbox(
+                gr.Markdown("**Add a test case manually**")
+                with gr.Row():
+                    with gr.Column():
+                        man_question = gr.Textbox(
                             label="Question",
-                            placeholder="e.g. What is the block size defined in the file system?",
                             lines=2,
+                            placeholder="e.g. What is the block size in the file system?",
                         )
-                        tc_ref = gr.Textbox(
-                            label="Reference document",
-                            placeholder="Paste the source text the answer must come from...",
-                            lines=6,
+                        man_ref = gr.Textbox(
+                            label="Reference text (the document passage that contains the correct answer)",
+                            lines=5,
+                            placeholder="Paste the relevant section of your document here...",
                         )
                         with gr.Row():
-                            tc_domain = gr.Dropdown(
-                                choices=DOMAINS,
-                                value="general",
-                                label="Domain",
-                                scale=2,
+                            man_domain = gr.Dropdown(
+                                choices=DOMAINS, value="general", label="Domain"
                             )
-                            tc_source_type = gr.Radio(
+                            man_source_type = gr.Radio(
                                 choices=["internal", "public"],
                                 value="internal",
                                 label="Source type",
-                                info="Internal = private doc the LLM hasn't seen. Public = Wikipedia, papers, etc.",
-                                scale=1,
                             )
-                        tc_add_btn = gr.Button("Add test case", variant="primary")
-                        tc_add_out = gr.Markdown()
-                        tc_add_btn.click(
+                        man_add_btn = gr.Button("Add test case", variant="primary")
+                        man_add_out = gr.Markdown()
+                        man_add_btn.click(
                             fn=add_case_fn,
                             inputs=[
                                 bm_list,
-                                tc_question,
-                                tc_ref,
-                                tc_domain,
-                                tc_source_type,
+                                man_question,
+                                man_ref,
+                                man_domain,
+                                man_source_type,
                             ],
-                            outputs=tc_add_out,
+                            outputs=man_add_out,
                         )
 
-                    with gr.Tab("Bulk import from CSV"):
-                        gr.Markdown(
-                            "CSV must have columns: `question`, `reference_text`. Optional: `domain`, `source_type` (internal/public).\n\n"
-                            "```\nquestion,reference_text,domain,source_type\n"
-                            "What is the block size?,The VCB stores block size as 512 bytes...,technical,internal\n```"
-                        )
-                        bulk_csv = gr.Textbox(
-                            label="CSV content",
-                            lines=10,
-                            placeholder="question,reference_text,domain\n...",
-                        )
-                        bulk_btn = gr.Button("Import", variant="primary")
-                        bulk_out = gr.Markdown()
-                        bulk_btn.click(
-                            fn=bulk_import_fn,
-                            inputs=[bm_list, bulk_csv],
-                            outputs=bulk_out,
-                        )
+                gr.Markdown("**Delete a test case**")
+                with gr.Row():
+                    del_case_id = gr.Textbox(
+                        label="Case ID (shown in brackets when you load cases)", scale=1
+                    )
+                    del_case_btn = gr.Button("Delete case", variant="stop", scale=0)
+                del_case_out = gr.Markdown()
+                del_case_btn.click(
+                    fn=delete_case_fn, inputs=del_case_id, outputs=del_case_out
+                )
 
-                    with gr.Tab("Auto-generate from document"):
-                        gr.Markdown(
-                            "Paste a reference document and the selected LLM will generate factual questions from it. "
-                            "All generated questions will use this document as their reference."
-                        )
-                        gen_ref = gr.Textbox(
-                            label="Reference document",
-                            lines=8,
-                            placeholder="Paste the source document here...",
-                        )
-                        with gr.Row():
-                            gen_num = gr.Slider(
-                                3,
-                                30,
-                                value=10,
-                                step=1,
-                                label="Number of questions",
-                                scale=2,
-                            )
-                            gen_domain = gr.Dropdown(
-                                choices=DOMAINS,
-                                value="general",
-                                label="Domain",
-                                scale=1,
-                            )
-                            gen_source_type = gr.Radio(
-                                choices=["internal", "public"],
-                                value="internal",
-                                label="Source type",
-                                scale=1,
-                            )
-                        gen_btn = gr.Button("Generate test cases", variant="primary")
-                        gen_out = gr.Markdown()
-                        gen_preview = gr.Textbox(
-                            label="Generated questions", lines=8, interactive=False
-                        )
-                        gen_btn.click(
-                            fn=generate_cases_fn,
-                            inputs=[
-                                bm_list,
-                                gen_ref,
-                                gen_num,
-                                gen_domain,
-                                gen_source_type,
-                                g_provider,
-                                g_model,
-                                g_api_key,
-                            ],
-                            outputs=[gen_out, gen_preview],
-                        )
-
+            # ------------------------------------------------------------------
             with gr.Tab("Run Eval"):
                 gr.Markdown(
-                    "Select a benchmark and click Start. The system runs each test case against the selected model, "
-                    "scores the response using the NLI pipeline, and saves everything to the database. "
-                    "Check the Results tab when the run completes."
+                    "Pick a benchmark and click Start. "
+                    "The system sends each question to the selected model, gets its answer, "
+                    "and scores every sentence against the reference document using the NLI model. "
+                    "Results are saved and available in the Results tab."
                 )
                 with gr.Row():
                     run_bm_choice = gr.Dropdown(
-                        choices=_benchmark_choices(), label="Benchmark", scale=3
+                        choices=_benchmark_choices(),
+                        label="Benchmark to evaluate",
+                        scale=3,
                     )
                     run_bm_refresh = gr.Button("Refresh", size="sm", scale=0)
                 run_bm_refresh.click(
@@ -645,7 +725,7 @@ def build_ui() -> gr.Blocks:
                 run_status_out = gr.Textbox(
                     label="Progress", lines=5, interactive=False
                 )
-                run_refresh_out = gr.State()
+                run_refresh_state = gr.State()
 
                 run_btn.click(
                     fn=start_run_fn,
@@ -659,12 +739,15 @@ def build_ui() -> gr.Blocks:
                         grounded_s,
                         partial_s,
                     ],
-                    outputs=[run_status_out, run_refresh_out],
+                    outputs=[run_status_out, run_refresh_state],
                 )
 
+            # ------------------------------------------------------------------
             with gr.Tab("Results"):
                 gr.Markdown(
-                    "Browse completed runs. Select a run to see the full per-question breakdown and domain scores."
+                    "Browse all completed eval runs. "
+                    "Select a run and load it to see the overall score, domain breakdown, "
+                    "and what the model said for each question."
                 )
                 with gr.Row():
                     results_run_choice = gr.Dropdown(
@@ -678,13 +761,13 @@ def build_ui() -> gr.Blocks:
 
                 load_results_btn = gr.Button("Load results", variant="primary")
                 results_summary = gr.Textbox(
-                    label="Run summary", lines=5, interactive=False
+                    label="Summary", lines=4, interactive=False
                 )
                 results_domains = gr.Textbox(
                     label="Domain breakdown", lines=6, interactive=False
                 )
                 results_cases = gr.Textbox(
-                    label="Per-question results", lines=20, interactive=False
+                    label="Per-question results", lines=24, interactive=False
                 )
                 load_results_btn.click(
                     fn=load_run_results_fn,
@@ -692,18 +775,21 @@ def build_ui() -> gr.Blocks:
                     outputs=[results_summary, results_domains, results_cases],
                 )
 
+            # ------------------------------------------------------------------
             with gr.Tab("Compare Models"):
                 gr.Markdown(
-                    "Select two runs to compare side by side. "
-                    "Run both on the same benchmark for a meaningful comparison. "
-                    "The report shows which questions improved, regressed, or stayed the same."
+                    "Run the same benchmark against two different models, then compare here. "
+                    "The report shows which model hallucinated more, which questions flipped, "
+                    "and flags any results from public documents that may not be trustworthy."
                 )
                 with gr.Row():
                     compare_a = gr.Dropdown(
-                        choices=_run_choices(), label="Run A (baseline)", scale=2
+                        choices=_run_choices(), label="Run A (baseline model)", scale=2
                     )
                     compare_b = gr.Dropdown(
-                        choices=_run_choices(), label="Run B (challenger)", scale=2
+                        choices=_run_choices(),
+                        label="Run B (model to compare)",
+                        scale=2,
                     )
                     compare_refresh = gr.Button("Refresh", size="sm", scale=0)
                 compare_refresh.click(
