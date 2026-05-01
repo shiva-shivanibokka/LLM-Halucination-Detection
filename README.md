@@ -11,13 +11,16 @@ The core scoring engine uses a local NLI model (DeBERTa-v3-large) to check every
 ## Workflow
 
 ```
-1. Create a benchmark
-   └── Add test cases: question + reference document + domain + source type
+1. Upload a PDF
+   └── Name the benchmark, set how many questions, click Create
+   └── The LLM reads the PDF and generates factual test questions automatically
 
 2. Run the benchmark against a model
-   └── System generates a response per test case, scores it with NLI, saves to DB
+   └── Pick a provider and model, click Start
+   └── System gets the model's answer for each question, scores every sentence
+       against the reference document using the NLI model, saves to DB
 
-3. Run again with a different model
+3. Run again with a different model or a newer version
 
 4. Compare the two runs
    └── Overall score delta, per-question breakdown, domain scores, source type split
@@ -25,7 +28,8 @@ The core scoring engine uses a local NLI model (DeBERTa-v3-large) to check every
 
 ## Features
 
-- **Benchmark management** — create named benchmarks, add test cases manually, bulk import via CSV, or auto-generate questions from a document using the LLM
+- **PDF-first benchmark creation** — upload a PDF, name the benchmark, and the LLM auto-generates factual test questions from it. No manual question writing required
+- **Manual test case management** — add questions one at a time, bulk import via CSV, or delete individual cases from the My Benchmarks tab
 - **Multi-provider support** — OpenAI, Anthropic, Groq, Mistral, Gemini, Ollama (local) — all via the OpenAI-compatible SDK
 - **NLI scoring engine** — DeBERTa-v3-large scores every sentence in the LLM response against the reference document
 - **Domain tagging** — tag test cases by domain (medical, legal, finance, technical, etc.) and see domain-level score breakdowns
@@ -52,7 +56,7 @@ LLM-Halucination-Detection/
 │   └── runner.py            Runs a full benchmark end-to-end, writes to DB
 ├── api/
 │   └── main.py              FastAPI — 15 endpoints
-├── app.py                   Gradio frontend — 4 tabs
+├── app.py                   Gradio frontend — 5 tabs
 ├── eval_platform.db         Created automatically on first run
 ├── requirements.txt
 └── .env.example
@@ -112,9 +116,10 @@ Open `http://127.0.0.1:7860` in your browser.
 
 | Tab | What it does |
 |---|---|
-| Benchmarks | Create benchmarks, add test cases manually or via CSV, or auto-generate from a document |
-| Run Eval | Select a benchmark and model, click Start — results stream in as each case completes |
-| Results | Browse all runs, view per-question breakdown and domain-level scores |
+| New Benchmark | Upload a PDF, name the benchmark, click Create — questions are auto-generated from the PDF |
+| My Benchmarks | View existing benchmarks, inspect test cases, add questions manually, delete cases |
+| Run Eval | Select a benchmark and model, click Start — progress updates live, results saved to DB |
+| Results | Browse all completed runs, per-question breakdown, domain-level hallucination scores |
 | Compare Models | Diff two runs side by side — overall delta, per-question verdict, source type split |
 
 ## API Endpoints
