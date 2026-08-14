@@ -1,5 +1,16 @@
 # LLM Hallucination Eval Platform
 
+> [!IMPORTANT]
+> **The hosted demo is temporary.** This project's backend runs on Google Cloud
+> Run under a Google Cloud free trial that ends **around 19 September 2026**.
+> When the trial closes the service is stopped, and every `run.app` link below
+> stops responding. The hosted frontend will keep loading after that date, but it
+> will not be able to reach its API, so it will show no data.
+>
+> Nothing in this repository depends on that. The code, tests and results are
+> complete, and the instructions below run the whole thing locally.
+
+
 > Score an LLM's answers against reference documents with an NLI detector — and measure that detector against **human** hallucination labels.
 
 [![CI](https://github.com/shiva-shivanibokka/llm-hallucination-detection/actions/workflows/ci.yml/badge.svg)](https://github.com/shiva-shivanibokka/llm-hallucination-detection/actions/workflows/ci.yml)
