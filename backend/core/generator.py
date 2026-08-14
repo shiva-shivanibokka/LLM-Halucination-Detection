@@ -22,7 +22,7 @@ Two generation modes:
 """
 
 import os
-from typing import Optional
+
 from openai import OpenAI
 
 TOP_K_CONTEXT = 5
@@ -107,7 +107,7 @@ DEFAULT_MODEL: dict[str, str] = {
 }
 
 
-def _get_client(provider: str, api_key: Optional[str] = None) -> OpenAI:
+def _get_client(provider: str, api_key: str | None = None) -> OpenAI:
     """Return an OpenAI SDK client for the given provider.
     Key resolution (BYOK): the caller-supplied api_key wins; otherwise fall back
     to the server env key (so free providers work out-of-the-box)."""
@@ -141,8 +141,8 @@ def _call_llm(
     system: str,
     prompt: str,
     provider: str,
-    model: Optional[str],
-    api_key: Optional[str] = None,
+    model: str | None,
+    api_key: str | None = None,
 ) -> str:
     """Core call: routes to the right provider and returns the response text."""
     provider = provider.lower()
@@ -175,8 +175,8 @@ def generate_grounded(
     question: str,
     vector_store,
     provider: str = "openai",
-    model: Optional[str] = None,
-    api_key: Optional[str] = None,
+    model: str | None = None,
+    api_key: str | None = None,
 ) -> str:
     """Generate a response grounded in source documents from the vector store."""
     candidates = vector_store.query(question, k=TOP_K_CONTEXT)

@@ -17,14 +17,13 @@ GET /runs/{run_id}. LLM provider keys come from the server environment only.
 """
 
 from dataclasses import asdict
-from typing import Optional
 
 from core.detector import (
-    HallucinationDetector,
-    DEFAULT_ENTAIL_THRESHOLD,
     DEFAULT_CONTRADICT_THRESHOLD,
+    DEFAULT_ENTAIL_THRESHOLD,
     DEFAULT_GROUNDED_CEILING,
     DEFAULT_PARTIAL_CEILING,
+    HallucinationDetector,
 )
 from core.generator import generate_grounded
 from core.ingestor import extract_text_chunks
@@ -39,6 +38,7 @@ from db.models import (
     get_test_cases,
     save_run_metrics,
 )
+
 from eval.scoring import binary_metrics, label_to_binary
 
 log = get_logger(__name__)
@@ -46,7 +46,7 @@ log = get_logger(__name__)
 
 def run_benchmark(
     run_id: int,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     entail_threshold: float = DEFAULT_ENTAIL_THRESHOLD,
     contradict_threshold: float = DEFAULT_CONTRADICT_THRESHOLD,
     grounded_ceiling: float = DEFAULT_GROUNDED_CEILING,
@@ -138,12 +138,12 @@ def run_benchmark(
         log.info("run_completed",
                  extra={"run_id": run_id, "avg_score": avg_score, "failed": failed})
 
-    except Exception as e:  # noqa: BLE001 — mark the run failed, don't crash the worker
+    except Exception as e:
         log.exception("run_failed", extra={"run_id": run_id})
         try:
             with get_connection() as conn:
                 fail_run(conn, run_id, str(e))
-        except Exception:  # noqa: BLE001 — DB itself may be down; nothing more we can do
+        except Exception:
             log.exception("run_fail_write_failed", extra={"run_id": run_id})
 
 

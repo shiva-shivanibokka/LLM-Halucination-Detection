@@ -36,9 +36,7 @@ def _is_hallucinated(row: dict) -> bool:
     if isinstance(proc, dict):
         return bool(proc.get("evident_conflict") or proc.get("baseless_info"))
     labels = row.get("hallucination_labels")
-    if labels in (None, "", "[]", [], {}):
-        return False
-    return True
+    return labels not in (None, "", "[]", [], {})
 
 
 def load_ragtruth(split: str = "train", limit: int | None = 50) -> list[RagCase]:

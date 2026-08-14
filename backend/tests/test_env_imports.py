@@ -14,9 +14,12 @@ import sys
 
 
 def test_sentence_transformers_imports_without_crash():
+    # check=False on purpose: the assertion below inspects returncode, so
+    # raising here would replace a readable failure with a CalledProcessError.
     r = subprocess.run(
         [sys.executable, "-c", "import sentence_transformers"],
         capture_output=True,
+        check=False,
     )
     assert r.returncode == 0, (
         f"import crashed: rc={r.returncode}. If rc=139 (segfault), a stray "

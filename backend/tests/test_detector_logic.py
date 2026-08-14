@@ -11,7 +11,7 @@ def test_contradiction_in_non_top_entail_chunk_is_caught():
         {"entailment": 0.05, "contradiction": 0.95, "neutral": 0.00},  # A
         {"entailment": 0.30, "contradiction": 0.10, "neutral": 0.60},  # B
     ]
-    best_i, best_entail, best_contradict, best_neutral = _reduce_candidates(scored)
+    best_i, best_entail, best_contradict, _best_neutral = _reduce_candidates(scored)
     assert best_i == 1               # entailment still comes from chunk B
     assert best_entail == 0.30
     assert best_contradict == 0.95   # contradiction taken from chunk A

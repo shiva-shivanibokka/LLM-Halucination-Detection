@@ -14,7 +14,6 @@ Overall hallucination score and label are derived from sentence-level results.
 
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 from transformers import pipeline
@@ -36,7 +35,7 @@ class SentenceResult:
     entailment_score: float
     contradiction_score: float
     neutral_score: float
-    best_source_chunk: Optional[str]
+    best_source_chunk: str | None
     best_source_similarity: float
 
 

@@ -5,7 +5,6 @@ CRUD operations for all tables. Each function takes a psycopg Connection
 (dict_row) and returns plain dicts or lists of dicts. No ORM — just SQL.
 """
 
-from typing import Optional
 
 from psycopg.types.json import Jsonb
 
@@ -22,7 +21,7 @@ def create_benchmark(conn, name: str, description: str = "") -> dict:
     return dict(row)
 
 
-def get_benchmark(conn, benchmark_id: int) -> Optional[dict]:
+def get_benchmark(conn, benchmark_id: int) -> dict | None:
     row = conn.execute(
         "SELECT * FROM benchmarks WHERE id = %s", (benchmark_id,)
     ).fetchone()
@@ -57,8 +56,8 @@ def add_test_case(
     reference_text: str,
     domain: str = "general",
     source_type: str = "internal",
-    gold_label: Optional[str] = None,
-    answer: Optional[str] = None,
+    gold_label: str | None = None,
+    answer: str | None = None,
 ) -> dict:
     row = conn.execute(
         """INSERT INTO test_cases
@@ -122,7 +121,7 @@ def delete_test_case(conn, test_case_id: int) -> None:
 # Runs
 # --------------------------------------------------------------------------- #
 def create_run(conn, benchmark_id: int, provider: str, model: str,
-               dataset: Optional[str] = None) -> dict:
+               dataset: str | None = None) -> dict:
     row = conn.execute(
         """INSERT INTO eval_runs (benchmark_id, provider, model, status, dataset)
            VALUES (%s, %s, %s, 'running', %s) RETURNING *""",
@@ -151,7 +150,7 @@ def fail_run(conn, run_id: int, reason: str) -> None:
     conn.commit()
 
 
-def get_run(conn, run_id: int) -> Optional[dict]:
+def get_run(conn, run_id: int) -> dict | None:
     row = conn.execute(
         """SELECT r.*, b.name AS benchmark_name
            FROM eval_runs r JOIN benchmarks b ON b.id = r.benchmark_id
@@ -161,7 +160,7 @@ def get_run(conn, run_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def list_runs(conn, benchmark_id: Optional[int] = None) -> list[dict]:
+def list_runs(conn, benchmark_id: int | None = None) -> list[dict]:
     if benchmark_id is not None:
         rows = conn.execute(
             """SELECT r.*, b.name AS benchmark_name
@@ -193,7 +192,7 @@ def add_run_result(
     contradicted_count: int,
     total_sentences: int,
     sentence_results: list,
-    predicted_label: Optional[str] = None,
+    predicted_label: str | None = None,
 ) -> dict:
     row = conn.execute(
         """INSERT INTO run_results
@@ -286,7 +285,7 @@ def save_run_metrics(conn, run_id: int, metrics: dict) -> None:
     conn.commit()
 
 
-def get_run_metrics(conn, run_id: int) -> Optional[dict]:
+def get_run_metrics(conn, run_id: int) -> dict | None:
     row = conn.execute(
         "SELECT * FROM run_metrics WHERE run_id = %s", (run_id,)
     ).fetchone()

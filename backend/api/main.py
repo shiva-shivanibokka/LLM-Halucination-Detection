@@ -16,24 +16,22 @@ import io
 import os
 import re
 from contextlib import asynccontextmanager
-from typing import Optional
-
-from fastapi import Depends, FastAPI, Header, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 from core.detector import (
-    DEFAULT_ENTAIL_THRESHOLD,
     DEFAULT_CONTRADICT_THRESHOLD,
+    DEFAULT_ENTAIL_THRESHOLD,
     DEFAULT_GROUNDED_CEILING,
     DEFAULT_PARTIAL_CEILING,
 )
 from core.generator import PROVIDERS, _call_llm
 from core.logging_config import get_logger
 from data.ragtruth import seed_ragtruth_benchmark
-from db.database import init_db, get_connection
 from db import models as db
+from db.database import get_connection, init_db
 from eval.runner import run_benchmark
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 log = get_logger(__name__)
 
@@ -102,15 +100,15 @@ class GenerateCasesRequest(BaseModel):
     domain: str = "general"
     source_type: str = "internal"
     provider: str = "openai"
-    model: Optional[str] = None
-    api_key: Optional[str] = None  # BYOK; falls back to the server env key
+    model: str | None = None
+    api_key: str | None = None  # BYOK; falls back to the server env key
 
 
 class StartRunRequest(BaseModel):
     benchmark_id: int
     provider: str
     model: str
-    api_key: Optional[str] = None  # BYOK; falls back to the server env key
+    api_key: str | None = None  # BYOK; falls back to the server env key
     entail_threshold: float = DEFAULT_ENTAIL_THRESHOLD
     contradict_threshold: float = DEFAULT_CONTRADICT_THRESHOLD
     grounded_ceiling: float = DEFAULT_GROUNDED_CEILING
@@ -120,7 +118,7 @@ class StartRunRequest(BaseModel):
 class SeedRagtruthRequest(BaseModel):
     split: str = "train"
     limit: int = 50
-    name: Optional[str] = None
+    name: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +130,7 @@ def health():
     try:
         with get_connection() as conn:
             conn.execute("SELECT 1")
-    except Exception:
+    except Exception:  # noqa: BLE001 - health probe: any failure means "down"
         db_ok = False
     status = "ok" if db_ok else "down"
     code = 200 if db_ok else 503
@@ -166,7 +164,7 @@ def create_benchmark(req: BenchmarkCreate):
     with get_connection() as conn:
         try:
             return db.create_benchmark(conn, req.name, req.description)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - mapped to 409/500 below
             if "unique" in str(e).lower():
                 raise HTTPException(status_code=409, detail=f"A benchmark named '{req.name}' already exists.")
             raise HTTPException(status_code=500, detail=str(e))
@@ -250,7 +248,7 @@ def generate_cases(benchmark_id: int, req: GenerateCasesRequest):
     )
     try:
         raw = _call_llm(system, prompt, req.provider, req.model, req.api_key)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - external call, mapped to 502
         log.warning("generate_cases_llm_failed provider=%s model=%s: %s", req.provider, req.model, e)
         raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
 
@@ -290,7 +288,7 @@ def delete_case(case_id: int):
 # Runs
 # --------------------------------------------------------------------------- #
 @app.get("/runs")
-def list_runs(benchmark_id: Optional[int] = None):
+def list_runs(benchmark_id: int | None = None):
     with get_connection() as conn:
         return db.list_runs(conn, benchmark_id)
 

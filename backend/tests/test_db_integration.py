@@ -5,7 +5,6 @@ otherwise via the `db` fixture. Runs in CI against a Postgres service.
 """
 
 import pytest
-
 from db import models as m
 
 

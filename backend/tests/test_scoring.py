@@ -1,6 +1,6 @@
 """Pure-logic tests for detector-vs-gold metrics. No DB, runs anywhere."""
 
-from eval.scoring import binary_metrics, label_to_binary, HALLUCINATED, GROUNDED
+from eval.scoring import GROUNDED, HALLUCINATED, binary_metrics, label_to_binary
 
 
 def test_f1_on_known_pairs():
